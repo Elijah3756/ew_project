@@ -1,0 +1,469 @@
+%% CDR 2026 EW Special Issue -- Adversarial RF Robustness
+%% Based on template-cdrarticle.tex Version 1.7
+
+% Review (double-blind, for Research Articles; hides authors/acknowledgments):
+\documentclass[cdrreview,anonymous,review]{cdrart}
+
+\cdrArticleType{Research Article}
+
+% ================= DO NOT EDIT =================
+\input{config}
+
+% ================= BIBLIOGRAPHY =================
+\usepackage[authordate,citetracker=true,dashed=false,backend=biber]{biblatex-chicago}
+\setlength{\bibitemsep}{0pt}
+\AtBeginBibliography{\setstretch{1}\lseries\scriptsize\selectfont}
+\addbibresource{template-bibliography.bib}
+
+% ================= ADDITIONAL PACKAGES =================
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{document}
+
+% ================= ARTICLE TITLE =================
+
+\title[Adversarial Robustness of AI-Based RF Classifiers]{Adversarial Robustness of AI-Based RF Signal Classification Under Channel Impairments}
+
+% ====== AUTHORS & AFFILIATIONS ======
+% Hidden during double-blind review
+
+\author{Elijah Bellamy}
+\authornote{Corresponding author}
+\affiliationnum[1]
+\email{elijah.bellamy@example.edu}
+
+\affiliation{%
+\num{1}
+  \institution{United States Military Academy}
+  \city{West Point}
+  \state{NY}
+  \country{USA}
+}
+
+\renewcommand{\shortauthors}{Bellamy}
+
+% ================= ABSTRACT AND KEYWORDS =================
+
+\begin{abstract}
+We present a systematic evaluation of adversarial robustness for deep learning-based RF modulation classifiers under realistic channel impairments, spanning RadioML 2016.10a (11 modulations) and 2018.01a (24 modulations). Using physically grounded L2 norm-ratio perturbation constraints ($\|\boldsymbol{\delta}\|_2 / \|\mathbf{x}\|_2 \leq \rho$) and an evaluation methodology that correctly accounts for native dataset SNR, we find that: (1) adversarial attacks at operationally relevant power levels ($\rho = 1\%$, $-40$~dB power ratio) achieve attack success rates of 7--9\% on the 11-class task and 31--35\% on the 24-class task, substantially lower than prior reports using different constraint formulations; (2) channel impairments---particularly Rayleigh fading---cause far more classifier degradation than adversarial perturbations, reducing accuracy by 38--64 percentage points versus 7--28 points from PGD attacks; (3) channel augmentation training is the most efficient defense, achieving the largest ASR reduction per training hour on both datasets; and (4) adversarial vulnerability scales significantly with task complexity, with extreme per-class variation from below 1\% to above 99\% ASR. These findings reframe adversarial robustness for cognitive electronic warfare systems as an interaction effect with channel conditions rather than a standalone threat.
+\end{abstract}
+
+\keywords{adversarial machine learning, RF signal classification, electronic warfare, channel impairments, deep learning robustness}
+
+\maketitle\newpage
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% ================= BODY =================
+
+\section{Introduction}
+
+Artificial intelligence (AI) and deep learning have rapidly become essential enablers of machine-speed spectrum awareness in contested electromagnetic environments. Modern radio frequency (RF) classifiers, trained on in-phase and quadrature (I/Q) baseband samples, can identify modulation schemes, detect emitters, and support adaptive spectrum management at speeds far exceeding human operators. These capabilities underpin cognitive electronic warfare (EW), where the ability to classify, characterize, and respond to adversary waveforms in real time is a prerequisite for spectrum dominance in multi-domain operations.
+
+However, the robustness of these AI-driven classifiers under adversarial conditions remains poorly understood. The broader machine learning community has demonstrated that deep neural networks are susceptible to adversarial perturbations---small, carefully crafted modifications to inputs that cause misclassification with high confidence. While this vulnerability has been extensively studied in computer vision and natural language processing, its implications for physical-layer RF signal classification in contested spectrum environments have received comparatively limited attention. Prior RF adversarial studies have reported dramatic accuracy drops using norm-based perturbation constraints borrowed from computer vision, but whether these findings hold under physically grounded L2 norm-ratio constraints ($\|\boldsymbol{\delta}\|_2 / \|\mathbf{x}\|_2 \leq \rho$, where $\rho$ is a norm ratio and power ratio $= \rho^2$) and correct SNR evaluation methodology is an open question.
+
+The gap is particularly consequential in electronic warfare contexts. A misclassified waveform can trigger incorrect countermeasures, degrade situational awareness, or enable adversary deception. Unlike image classification, where adversarial perturbations must survive printing and recapture, RF adversarial perturbations face a different set of physical constraints: they must contend with channel impairments including additive white Gaussian noise (AWGN), multipath fading, carrier frequency offset (CFO), and timing offsets. Whether these channel effects attenuate adversarial perturbations, compound with them, or fundamentally alter the threat landscape is critical for assessing the real-world robustness of deployed RF classifiers---yet no prior work has systematically disentangled the contributions of channel impairments and adversarial manipulation to classifier degradation.
+
+This paper addresses this gap through a systematic experimental evaluation of adversarial robustness for deep learning-based RF modulation classifiers under realistic channel impairments, spanning two benchmark datasets of increasing complexity: RadioML 2016.10a (11 modulations, 128-sample windows) and RadioML 2018.01a (24 modulations, 1024-sample windows). We make the following contributions:
+
+\begin{enumerate}
+\item \textbf{Physically plausible threat model.} We define an adversarial threat model for complex baseband I/Q classifiers that uses L2 norm-ratio perturbation constraints ($\|\boldsymbol{\delta}\|_2 / \|\mathbf{x}\|_2 \leq \rho$) grounded in RF physics, rather than norm-based bounds borrowed from computer vision. We assume white-box attacks with no channel state information (no-CSI), representing the strongest attacker without access to unknown propagation effects. We show that this constraint formulation produces markedly different---and more operationally realistic---results than the norm-based evaluations in prior RF adversarial studies.
+
+\item \textbf{Channel-aware robustness evaluation across two datasets.} We quantify adversarial attack effectiveness across signal-to-noise ratio (SNR) under three channel conditions---AWGN, Rayleigh fading with AWGN, and Rayleigh fading with CFO and AWGN---on both RadioML 2016.10a and 2018.01a, capturing a range of contested spectrum scenarios and task complexities. A central finding is that channel impairments cause substantially more classifier degradation than adversarial perturbations at operationally relevant power levels, and that adversarial vulnerability scales significantly with the number of modulation classes and input dimensionality.
+
+\item \textbf{Evaluation methodology correction.} We identify and correct a potential evaluation artifact in RF adversarial robustness research using pre-collected benchmark datasets: the double application of AWGN to samples that already contain noise at their labeled SNR. This methodological correction substantially changes the quantitative picture of adversarial vulnerability.
+
+\item \textbf{Defense comparison with operational tradeoffs.} We evaluate four lightweight defense strategies---channel augmentation training, adversarial training, noise injection, and a combined approach---and report not only robustness gains but also computational overhead (training time, inference latency, parameter count), which is critical for edge-deployed EW systems operating under size, weight, and power constraints.
+
+\item \textbf{Task complexity scaling.} By evaluating on both RadioML 2016.10a (11 classes) and 2018.01a (24 classes), we demonstrate that adversarial vulnerability scales substantially with task complexity: attack success rates increase from 7--9\% to 31--35\% under identical perturbation constraints, with extreme per-class variation (from below 1\% for simple modulations to above 99\% for 256-QAM).
+
+\item \textbf{Operational implications.} We frame our findings in the context of machine-speed spectrum awareness and cognitive EW, arguing that channel hardening may be more operationally important than adversarial hardening for systems deployed in contested propagation environments, and that adversarial risk assessment must account for the complexity of the classification task.
+\end{enumerate}
+
+The remainder of this paper is organized as follows. Section~2 reviews related work. Section~3 defines the problem formulation and threat model. Section~4 describes the experimental methodology. Section~5 presents results. Section~6 discusses operational implications and limitations. Section~7 concludes.
+
+
+% ================= SECTION 2 =================
+
+\section{Related Work}
+
+\subsection{Deep Learning for RF Modulation Classification}
+
+The application of deep learning to automatic modulation classification (AMC) was catalyzed by O'Shea et al.~\autocite{OShea2016}, who demonstrated that convolutional neural networks (CNNs) operating directly on raw I/Q samples could achieve competitive recognition rates without hand-crafted features. Their introduction of the RadioML 2016.10a dataset established a common benchmark. Since then, a variety of architectures have been explored: CLDNN models~\autocite{Rajendran2018} combine convolutional feature extraction with LSTM temporal modeling, while systematic architecture searches~\autocite{Liu2017} have evaluated CNN, ResNet, and DenseNet variants for modulation classification. Deep residual networks applied to the larger RadioML 2018.01a dataset~\autocite{OShea2018} achieve high accuracy at high SNR but, like all deep architectures, rely on learned representations whose adversarial robustness has not been systematically characterized.
+
+A key observation across this body of work is that classification accuracy degrades substantially at low SNR, and that performance is sensitive to the channel conditions under which models are trained and evaluated~\autocite{West2017}. Models trained on clean or AWGN-only data often generalize poorly to fading environments, motivating channel-aware training strategies.
+
+\subsection{Adversarial Machine Learning}
+
+Adversarial vulnerability in deep neural networks was formalized by Goodfellow et al.~\autocite{Goodfellow2015}, who introduced the Fast Gradient Sign Method (FGSM) and showed that linear properties of high-dimensional classifiers make them susceptible to small, carefully crafted perturbations. Madry et al.~\autocite{Madry2018} strengthened this line of work by framing adversarial robustness as a min-max optimization problem and introducing Projected Gradient Descent (PGD) as a strong first-order attack. Carlini and Wagner~\autocite{Carlini2017} further demonstrated that optimization-based attacks can defeat many proposed defenses.
+
+On the defense side, Cohen et al.~\autocite{Cohen2019} introduced randomized smoothing as a method for providing certified robustness guarantees by averaging predictions over Gaussian-perturbed inputs. Extensions to other norm balls~\autocite{Salman2019} and practical adversarial training variants that reduce computational cost~\autocite{Shafahi2019} have broadened the defense toolkit.
+
+\subsection{Adversarial Attacks on RF Classifiers}
+
+Several groups have applied adversarial attack techniques specifically to RF signal classifiers. Flowers et al.~\autocite{Flowers2019} demonstrated that FGSM, PGD, and momentum-based iterative attacks can substantially degrade modulation classification accuracy under L-inf perturbation constraints. However, those results used norm-based perturbation bounds (L-inf) at perturbation magnitudes that correspond to substantially higher perturbation-to-signal ratios than the norm-ratio constraints ($\|\boldsymbol{\delta}\|_2 / \|\mathbf{x}\|_2 \leq \rho$) grounded in RF physics that we employ; the constraint type difference means reported attack success rates are not directly comparable across studies. Targeted attacks~\autocite{Sadeghi2018} have shown that adversarial perturbations transfer across architectures with non-trivial success rates (30--70\%), indicating that the vulnerability is not architecture-specific.
+
+More recent work has explored physically motivated attack variants. Frequency-selective adversarial perturbations~\autocite{Hameed2021} operate in the spectral domain, while studies on GaN power amplifier identification~\autocite{Restuccia2020} have demonstrated that RF fingerprinting systems are similarly vulnerable. Detection-based defenses~\autocite{Lin2020} using peak-to-average power ratio (PAPR) analysis have shown promise. A critical finding is that adversarial perturbations generated in the digital domain often degrade when transmitted over the air~\autocite{Bahramali2021}, motivating channel-aware attack design.
+
+\subsection{Channel Effects and Adversarial Robustness}
+
+The interaction between wireless channel impairments and adversarial robustness remains poorly understood. RF transceivers contend with a range of impairments including AWGN, multipath fading, carrier frequency offset, phase noise, and timing offsets~\autocite{Rappaport2002}. Channel-aware adversarial attacks~\autocite{Kim2021} that account for expected channel response have been proposed, while over-the-air adversarial attack frameworks~\autocite{Sagduyu2019} have demonstrated that physically realizable attacks require fundamentally different design considerations. Training with simulated channel augmentation~\autocite{Dudorov2022} has been shown to improve both clean accuracy under impairments and adversarial robustness. However, no prior work has systematically evaluated adversarial robustness across a controlled matrix of channel conditions, perturbation budgets, and defense strategies while reporting the computational tradeoffs critical for edge-deployed systems.
+
+\subsection{Electronic Warfare and Cognitive Spectrum Operations}
+
+AI-enabled spectrum operations are a strategic priority for military organizations. Cognitive electronic warfare (CEW) leverages machine learning to achieve machine-speed spectrum awareness, adaptive jamming, and rapid signal identification~\autocite{Haigh2021}. The U.S.\ Department of Defense has invested in AI/ML-driven spectrum management through programs including DARPA's RF Machine Learning Systems initiative~\autocite{DARPA2018}. In this context, adversarial vulnerability of RF classifiers represents a direct operational risk, yet the EW community has largely treated adversarial robustness as a peripheral concern rather than a first-order design constraint.
+
+\subsection{Positioning of This Work}
+
+Our work addresses the gap at the intersection of adversarial machine learning and RF signal classification under realistic channel conditions. Unlike prior RF adversarial studies that evaluate attacks in isolation~\autocite{Flowers2019,Sadeghi2018} or under single channel conditions, we systematically vary both channel impairments and perturbation budgets across an SNR sweep on two benchmark datasets of increasing complexity, disentangling the contributions of adversarial manipulation and channel degradation. We ground our threat model in RF physics using L2 norm-ratio constraints and evaluate under propagation conditions relevant to contested spectrum operations. We provide quantitative experimental evidence showing that channel impairments---not adversarial perturbations---are the dominant source of classifier degradation at operationally relevant power levels, that adversarial vulnerability scales significantly with the number of modulation classes (from 7--9\% ASR on 11 classes to 31--35\% on 24 classes), and we offer actionable defense comparisons with computational overhead analysis suitable for edge deployment.
+
+
+% ================= SECTION 3 =================
+
+\section{Problem Formulation and Threat Model}
+
+\subsection{Modulation Classification Task}
+
+We consider the supervised classification of RF modulation schemes from complex baseband I/Q samples. Let $\mathbf{x} \in \mathbb{R}^{2 \times N}$ denote a windowed observation of $N$ time-domain samples, where the two channels represent the in-phase (I) and quadrature (Q) components. A deep neural network classifier $f_\theta$ maps each observation to a predicted modulation class:
+\begin{equation}
+f_\theta(\mathbf{x}) \rightarrow y, \quad y \in \{1, \ldots, K\}
+\end{equation}
+where $K$ is the number of modulation classes and $\theta$ denotes the learned parameters.
+
+\subsection{Channel Model}
+
+The received signal passes through a composite wireless channel $h(\cdot)$ before reaching the classifier. We model three impairment types:
+
+\textbf{AWGN.} Additive white Gaussian noise is added to achieve a target SNR:
+\begin{equation}
+\mathbf{r} = \mathbf{x} + \mathbf{n}, \quad \mathbf{n} \sim \mathcal{N}(0, \sigma^2 \mathbf{I})
+\end{equation}
+
+\textbf{Rayleigh Fading.} Flat (block) Rayleigh fading applies a random complex gain:
+\begin{equation}
+\mathbf{r} = h \cdot \mathbf{x}, \quad h \sim \mathcal{CN}(0, 1)
+\end{equation}
+
+\textbf{Carrier Frequency Offset (CFO).} A normalized frequency offset $\Delta f$ introduces a time-varying phase rotation:
+\begin{equation}
+r[n] = x[n] \cdot e^{j 2\pi \Delta f \cdot n}
+\end{equation}
+where $\Delta f$ is drawn uniformly from $[-\Delta f_{\max}, \Delta f_{\max}]$.
+
+The full composite channel applies impairments in sequence: Rayleigh fading, then CFO, then AWGN. This ordering reflects the physical signal path.
+
+\subsection{Adversarial Threat Model}
+
+We consider an adversary who introduces a perturbation $\boldsymbol{\delta}$ to the transmitted signal before it passes through the channel. The receiver observes:
+\begin{equation}
+\mathbf{r} = h(\mathbf{x} + \boldsymbol{\delta})
+\end{equation}
+
+This ``pre-channel'' attack models an adversary who can manipulate the signal at or near the transmitter, or who injects a low-power interfering waveform into the spectrum.
+
+\textbf{Adversary Knowledge.} We evaluate the white-box setting, where the adversary has full knowledge of the classifier architecture, weights, and the channel model, but no channel state information (no-CSI).
+
+\textbf{Perturbation Constraint.} Rather than adopting the $L_\infty$ or fixed-epsilon $L_2$ norms common in computer vision, we impose a power-ratio constraint that is physically meaningful in RF:
+\begin{equation}
+\frac{\|\boldsymbol{\delta}\|_2}{\|\mathbf{x}\|_2} \leq \rho
+\end{equation}
+where $\rho$ represents the maximum ratio of perturbation L2 norm to signal L2 norm. The corresponding power ratios are $\rho^2$; we evaluate $\rho \in \{0.5\%, 1\%, 2\%, 5\%\}$, corresponding to perturbation-to-signal power ratios of $-46$~dB to $-26$~dB. This constraint scales with signal energy, maps directly to interference-to-signal ratio (ISR), and produces markedly different results than norm-based constraints used in prior studies.
+
+\subsection{Attack Algorithms}
+
+\textbf{FGSM (Fast Gradient Sign Method).} A single-step attack:
+\begin{equation}
+\boldsymbol{\delta} = \epsilon \cdot \frac{\nabla_{\mathbf{x}} \mathcal{L}(f_\theta(\mathbf{x}), y)}{\|\nabla_{\mathbf{x}} \mathcal{L}\|_2}
+\end{equation}
+where $\epsilon = \rho \cdot \|\mathbf{x}\|_2$ and the gradient is L2-normalized.
+
+\textbf{PGD (Projected Gradient Descent).} A multi-step iterative attack with $T = 10$ steps:
+\begin{equation}
+\boldsymbol{\delta}_{t+1} = \Pi_{\mathcal{B}(\rho)} \left[ \boldsymbol{\delta}_t + \alpha \cdot \frac{\nabla_{\boldsymbol{\delta}} \mathcal{L}}{\|\nabla_{\boldsymbol{\delta}} \mathcal{L}\|_2} \right]
+\end{equation}
+where $\alpha$ is the step size and $\Pi$ projects onto the L2 ball of radius $\rho \cdot \|\mathbf{x}\|_2$.
+
+\subsection{Defense Strategies}
+
+We evaluate three defense mechanisms chosen for computational feasibility in edge-deployed EW systems:
+
+\textbf{Channel Augmentation Training.} The model is trained with on-the-fly random channel impairments (Rayleigh fading and CFO) applied to each training batch. No additional AWGN is applied during augmentation to avoid double-noising.
+
+\textbf{Adversarial Training (PGD-lite).} Following Madry et al.~\autocite{Madry2018}, training batches are augmented with adversarial examples from reduced-step PGD (5 steps). The loss combines clean and adversarial components:
+\begin{equation}
+\mathcal{L}_{\text{total}} = \alpha \cdot \mathcal{L}(f(\mathbf{x}), y) + (1 - \alpha) \cdot \mathcal{L}(f(\mathbf{x} + \boldsymbol{\delta}), y)
+\end{equation}
+where $\alpha = 0.5$.
+
+\textbf{Noise Injection (Gaussian Data Augmentation).} Gaussian noise is added to inputs during training. The trained model is evaluated normally at inference (single forward pass, no additional noise).
+
+
+% ================= SECTION 4 =================
+
+\section{Experimental Setup}
+
+\subsection{Datasets}
+
+We evaluate on two widely adopted benchmarks for automatic modulation classification (AMC).
+
+\textbf{RadioML 2016.10a.} 220,000 I/Q sample windows across 11 modulation schemes (8PSK, AM-DSB, AM-SSB, BPSK, CPFSK, GFSK, PAM4, 16-QAM, 64-QAM, QPSK, WBFM). Each sample: $(2, 128)$ tensor. SNR range: $-20$ to $+18$~dB in 2~dB increments. Filtered to $[-10, 18]$~dB yielding 165,000 samples.
+
+\textbf{RadioML 2018.01a.} Over 2.5 million I/Q sample windows across 24 modulation schemes (OOK, 4ASK, 8ASK, BPSK, QPSK, 8PSK, 16PSK, 32PSK, 16APSK, 32APSK, 64APSK, 128APSK, 16QAM, 32QAM, 64QAM, 128QAM, 256QAM, AM-SSB-WC, AM-SSB-SC, AM-DSB-WC, AM-DSB-SC, FM, GMSK, OQPSK). Each sample: $(2, 1024)$ tensor. SNR range: $-20$ to $+30$~dB. This dataset presents a substantially harder classification task.
+
+Both datasets use a fixed 70/15/15 train/validation/test split with deterministic seeding (seed = 42).
+
+\subsection{Model Architecture}
+
+Our baseline classifier is a four-block 1D CNN operating on the I/Q input: Conv1d(2, 64, 7)$\rightarrow$BN$\rightarrow$ReLU$\rightarrow$MaxPool(2), repeated with channels 64$\rightarrow$128$\rightarrow$128$\rightarrow$64 and kernels 7$\rightarrow$5$\rightarrow$3$\rightarrow$3, followed by AdaptiveAvgPool(1) and a two-layer classifier (64$\rightarrow$128$\rightarrow K$). The 2016 model contains 126,475 parameters ($K=11$); the 2018 model contains 128,152 ($K=24$). This architecture is inspired by VT-CNN2 with batch normalization and adaptive pooling.
+
+\subsection{Training Configuration}
+
+All models use Adam optimizer (lr=0.001, weight decay $10^{-4}$), cosine annealing schedule over 60 epochs, batch size 256. For adversarial training: PGD with 5 inner steps, $\rho = 0.01$, $\alpha = 0.5$ balancing clean and adversarial loss.
+
+\subsection{Channel Configurations}
+
+We evaluate under three channel conditions: (1) AWGN only, (2) Rayleigh fading + AWGN (fading coefficient $h \sim \mathcal{CN}(0,1)$), and (3) Rayleigh fading + CFO + AWGN (CFO: $\Delta f \sim U[-0.01, 0.01]$). All channel layers are differentiable PyTorch modules.
+
+\textbf{Evaluation methodology.} RadioML samples already contain AWGN at their labeled SNR. Our evaluation filters test samples by native SNR labels rather than re-applying AWGN, avoiding the double-noising artifact. For fading/CFO conditions, only non-AWGN impairments are applied on top of native samples.
+
+\textbf{Fading channel approximation.} When Rayleigh fading is applied, it acts on the combined signal-plus-noise: $h \cdot (\mathbf{x}_{\text{clean}} + \mathbf{n})$ rather than the physically correct $(h \cdot \mathbf{x}_{\text{clean}}) + \mathbf{n}$. This makes our fading results optimistic for the classifier (see Section~6.2).
+
+\subsection{Attack Configuration}
+
+Both FGSM and PGD use the L2 norm-ratio constraint. We evaluate four budgets: $\rho \in \{0.005, 0.01, 0.02, 0.05\}$ ($-46$ to $-26$~dB power ratio). PGD uses 10 steps with step size $\rho/4$ and random initialization.
+
+\subsection{Evaluation Metrics}
+
+We report clean accuracy, robust accuracy, attack success rate (ASR), training time, and parameter count. All stochastic evaluations are averaged over 10 independent trials with 95\% confidence intervals via Student's $t$-distribution.
+
+
+% ================= SECTION 5 =================
+
+\section{Results}
+
+We present results across both RadioML 2016.10a and 2018.01a. The dual-dataset evaluation tests whether our findings generalize from a compact classification task to a substantially more complex one.
+
+\subsection{Baseline Performance}
+
+The baseline CNN achieves 72.57\% pooled validation accuracy on 2016.10a and 62.83\% on 2018.01a. Training completes in approximately 14 minutes (2016) and 45 minutes (2018) on an NVIDIA A100 GPU.
+
+\textbf{RadioML 2016.10a.} Under AWGN, clean accuracy reaches 83.68\% at 0~dB and 85.59\% at 10~dB. Under Rayleigh fading, accuracy drops to 45.21\% at 0~dB and 41.42\% at 10~dB---a 38--44 percentage point reduction. CFO further degrades performance to 32.98\% at 10~dB. Accuracy under fading does not improve at higher SNR, indicating multiplicative distortion dominates.
+
+\textbf{RadioML 2018.01a.} Under AWGN, clean accuracy reaches 54.17\% at 0~dB and 90.72\% at 10~dB. Under Rayleigh fading, accuracy degrades to 26.64\% at 10~dB (a 64-point drop). Under Rayleigh+CFO, accuracy falls to 20.38\%. The more severe fading degradation reflects higher-order modulations' sensitivity to constellation distortion.
+
+\subsection{Adversarial Vulnerability}
+
+\subsubsection{Robust Accuracy vs SNR Under AWGN}
+
+\textbf{RadioML 2016.10a.} PGD at $\rho = 1\%$ achieves ASR of only 9.20\% at 0~dB and 7.37\% at 10~dB. FGSM achieves 8.63\% and 7.19\% respectively. The gap between clean and robust accuracy is approximately 7--8 percentage points at moderate-to-high SNR. PGD marginally outperforms FGSM (0.5--1 pp higher ASR).
+
+\textbf{RadioML 2018.01a.} PGD at $\rho = 1\%$ achieves ASR of 35.49\% at 0~dB and 30.87\% at 10~dB---roughly four times the 2016 rate. FGSM achieves 26.37\% ASR at 10~dB. The increased vulnerability is attributable to the higher-dimensional input space and more complex decision boundary geometry with 24 classes.
+
+\textbf{Cross-dataset comparison.} The contrast between 7--9\% ASR on 2016 and 31--35\% on 2018 underscores that adversarial vulnerability is task-dependent. These results stand in contrast to the high attack success rates reported in prior studies using different constraint formulations~\autocite{Flowers2019}. The discrepancy arises from our physically grounded norm-ratio constraint, correct SNR evaluation, and L2-normalized gradient direction.
+
+\subsubsection{Channel Interaction with Adversarial Attacks}
+
+Under Rayleigh fading, reported ASR appears substantially higher (PGD: 46.00\% at 10~dB on 2016), but the \textit{marginal damage} of the attack is small. Under Rayleigh+AWGN at 10~dB (2016), clean accuracy is 41.42\% and robust accuracy is 41.18\%---less than 0.3 pp of additional degradation. The high ASR reflects channel degradation being attributed to the attack.
+
+On 2018, PGD reports 58.6\% ASR under Rayleigh at 10~dB, but clean accuracy is already only 26.64\%. The marginal adversarial damage is again modest. Channel impairments and adversarial perturbations do not compound multiplicatively; the stochastic channel decorrelates the adversarial gradient from the received signal.
+
+\subsubsection{Attack Success vs Perturbation Budget}
+
+Table~\ref{tab:budget10} shows ASR as a function of perturbation budget at SNR = 10~dB.
+
+\begin{table}[ht]
+\scriptsize
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+$\rho$ (norm ratio) & \multicolumn{2}{c}{2016} & \multicolumn{2}{c}{2018} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+ & ASR (\%) & Rob.\ Acc (\%) & ASR (\%) & Rob.\ Acc (\%) \\
+\midrule
+0.005 (0.5\%, $-46$~dB) & 3.52 & 82.58 & 14.15 & 77.88 \\
+0.010 (1.0\%, $-40$~dB) & 7.36 & 79.29 & 30.85 & 62.73 \\
+0.020 (2.0\%, $-34$~dB) & 14.97 & 72.78 & 59.16 & 37.05 \\
+0.050 (5.0\%, $-26$~dB) & 44.32 & 47.66 & 78.64 & 19.38 \\
+\bottomrule
+\end{tabular}
+\caption{PGD Attack Success Rate vs Perturbation Budget (AWGN, SNR = 10~dB).}
+\label{tab:budget10}
+\end{table}
+
+The 2018 dataset shows a steeper initial slope: doubling $\rho$ from 0.5\% to 1\% increases ASR by 3.8 pp on 2016 but 16.7 pp on 2018. At $\rho = 5\%$, the 2018 classifier is nearly fully compromised (78.64\% ASR) while 2016 retains meaningful accuracy (47.66\% robust accuracy).
+
+\subsection{Defense Comparison}
+
+Tables~\ref{tab:defense2016} and~\ref{tab:defense2018} present defense results at SNR = 0 and 10~dB under AWGN with PGD at $\rho = 1\%$.
+
+\begin{table}[ht]
+\scriptsize
+\centering
+\begin{tabular}{llrrrr}
+\toprule
+Defense & SNR & Clean (\%) & Robust (\%) & ASR (\%) & Time (min) \\
+\midrule
+Baseline & 0 & 83.68 & 75.97 & 9.21 & -- \\
+Baseline & 10 & 85.59 & 79.32 & 7.33 & -- \\
+Adv.\ Training & 0 & 78.82 & 72.69 & 7.78 & 103.5 \\
+Adv.\ Training & 10 & 83.08 & 80.69 & 2.88 & 103.5 \\
+Noise Injection & 0 & 50.73 & 49.45 & 2.63 & 18.4 \\
+Noise Injection & 10 & 52.96 & 51.40 & 3.05 & 18.4 \\
+Channel Aug. & 0 & 79.43 & 74.33 & 6.57 & 18.9 \\
+Channel Aug. & 10 & 82.19 & 80.93 & 1.67 & 18.9 \\
+Adv.+Chan.\ Aug. & 0 & 80.22 & 75.85 & 5.45 & 105.1 \\
+Adv.+Chan.\ Aug. & 10 & 82.85 & 81.77 & 1.30 & 105.1 \\
+Noise+Chan.\ Aug. & 0 & 37.50 & 36.71 & 2.27 & 18.8 \\
+Noise+Chan.\ Aug. & 10 & 39.81 & 39.21 & 1.65 & 18.8 \\
+\bottomrule
+\end{tabular}
+\caption{Defense Comparison---RadioML 2016.10a (AWGN, PGD $\rho = 1\%$).}
+\label{tab:defense2016}
+\end{table}
+
+\begin{table}[ht]
+\scriptsize
+\centering
+\begin{tabular}{llrrrr}
+\toprule
+Defense & SNR & Clean (\%) & Robust (\%) & ASR (\%) & Time (min) \\
+\midrule
+Baseline & 0 & 54.17 & 35.02 & 35.49 & -- \\
+Baseline & 10 & 90.72 & 62.71 & 30.87 & -- \\
+Adv.\ Training & 0 & 51.68 & 37.69 & 27.79 & 411.0 \\
+Adv.\ Training & 10 & 86.07 & 63.76 & 25.92 & 411.0 \\
+Noise Injection & 0 & 51.97 & 32.25 & 38.09 & 149.1 \\
+Noise Injection & 10 & 87.98 & 54.54 & 38.01 & 149.1 \\
+Channel Aug. & 0 & 51.69 & 39.44 & 24.79 & 152.9 \\
+Channel Aug. & 10 & 58.03 & 49.54 & 15.61 & 152.9 \\
+Adv.+Chan.\ Aug. & 0 & 51.48 & 39.61 & 25.40 & 414.3 \\
+Adv.+Chan.\ Aug. & 10 & 40.50 & 36.97 & 8.75 & 414.3 \\
+Noise+Chan.\ Aug. & 0 & 51.11 & 38.70 & 25.64 & 153.7 \\
+Noise+Chan.\ Aug. & 10 & 57.11 & 49.39 & 14.61 & 153.7 \\
+\bottomrule
+\end{tabular}
+\caption{Defense Comparison---RadioML 2018.01a (AWGN, PGD $\rho = 1\%$).}
+\label{tab:defense2018}
+\end{table}
+
+\textbf{Channel augmentation} reduces ASR from 7.33\% to 1.67\% at 10~dB on 2016, and from 30.87\% to 15.61\% on 2018, while preserving most clean accuracy on 2016 (82.19\% vs.\ 85.59\%). On 2018, it trades peak AWGN performance (58.03\% vs.\ 90.72\%) for channel robustness.
+
+\textbf{Adversarial training} reduces ASR from 7.33\% to 2.88\% on 2016 and from 30.87\% to 25.92\% on 2018, but requires 5--6$\times$ more training time than channel augmentation.
+
+\textbf{Noise injection} achieves low ASR on 2016 (3.05\%) but with severe clean accuracy degradation (52.96\%). On 2018, it actually \textit{increases} ASR (38.01\% vs.\ 30.87\% baseline).
+
+\textbf{Combined defense} (adversarial training + channel augmentation) achieves the lowest ASR on both datasets: 1.30\% on 2016 and 8.75\% on 2018. On 2016, the clean accuracy cost is modest (82.85\% vs.\ 85.59\%); on 2018, it is substantial (40.50\% vs.\ 90.72\%).
+
+\textbf{Robustness-compute tradeoff.} Channel augmentation offers the best ASR reduction per training hour: 5.66 pp reduction in 18.9 min (2016) vs.\ 4.45 pp in 103.5 min for adversarial training. On 2018, the gap is more pronounced: 15.26 pp in 152.9 min vs.\ 4.95 pp in 411.0 min.
+
+\subsection{Per-Class Vulnerability Analysis}
+
+\textbf{RadioML 2016.10a.} At SNR = 10~dB, AM-DSB is most vulnerable (41.76\% ASR). Digital modulations like BPSK (0.64\%), QPSK (0.69\%), and 8PSK (2.12\%) are nearly impervious.
+
+\textbf{RadioML 2018.01a.} 256-QAM achieves 99.6\% ASR while OOK exhibits only 0.54\%. Other high-vulnerability modulations include 128-QAM (93.7\%) and 64-QAM (64.5\%). The vulnerability of high-order QAM is physically intuitive: dense constellation points are closely spaced, and even small I/Q perturbations can push samples across decision boundaries.
+
+\subsection{Transferability Analysis}
+
+We evaluate transfer attacks on 2016.10a (Table~\ref{tab:transfer}).
+
+\begin{table}[ht]
+\scriptsize
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Source $\rightarrow$ Target & Src.\ ASR (\%) & Tgt.\ ASR (\%) & Transfer (\%) \\
+\midrule
+Baseline $\rightarrow$ Channel Aug. & 9.12 & 4.32 & 38.3 \\
+Baseline $\rightarrow$ Adv.\ Train & 9.04 & 2.02 & 32.6 \\
+Baseline $\rightarrow$ Noise Inj. & 9.01 & 4.21 & 57.1 \\
+Baseline $\rightarrow$ Adv.+Chan.\ Aug. & 9.14 & 4.00 & 38.9 \\
+\bottomrule
+\end{tabular}
+\caption{Transfer Attack Success Rate (RadioML 2016.10a, SNR = 10~dB, PGD $\rho = 1\%$).}
+\label{tab:transfer}
+\end{table}
+
+Transfer rates range from 32.6\% to 57.1\%. Adversarial training shows the lowest transfer rate (32.6\%), suggesting it learns fundamentally different decision boundaries. These rates are substantially lower than the 30--70\% reported in prior studies~\autocite{Sadeghi2018}, likely reflecting the more constrained norm-ratio budget.
+
+
+% ================= SECTION 6 =================
+
+\section{Discussion}
+
+\subsection{Implications for Cognitive Electronic Warfare}
+
+\textbf{Channel hardening before adversarial hardening.} Under AWGN, PGD at $\rho = 1\%$ achieves 7--9\% ASR on 2016 but 31\% on 2018. Under fading, classifier accuracy degrades to 35--45\% (2016) or 20--27\% (2018). Channel hardening should be the first priority, with adversarial hardening as a secondary layer.
+
+\textbf{Evaluation methodology matters.} The double-noising artifact can inflate ASR by degrading baseline performance. Future evaluations must account for noise already present in benchmark datasets.
+
+\textbf{Perturbation constraint shapes threat assessment.} The norm-ratio constraint maps directly to ISR ($= \rho^2$), enabling operators to reason in familiar power-ratio terms.
+
+\textbf{Task complexity amplifies vulnerability.} The four-fold ASR increase from 2016 to 2018 under identical constraints demonstrates that adversarial risk scales with modulation classes and input dimensionality.
+
+\textbf{Modulation-specific risk.} Per-class variation from below 1\% to above 99\% ASR implies risk assessment should be disaggregated by waveform type.
+
+\textbf{Accidental robustness from fading.} Rayleigh fading decorrelates the adversarial gradient from the received signal. Three caveats apply: (1) this depends on the adversary lacking channel knowledge; (2) our PGD uses single-sample stochastic optimization, not full EoT; (3) our fading approximation is optimistic (see Section~6.2).
+
+\subsection{Limitations}
+
+\textbf{Fading channel approximation.} RadioML's baked-in AWGN means fading multiplies both signal and noise jointly: $h \cdot (\mathbf{x}_{\text{clean}} + \mathbf{n})$ rather than $(h \cdot \mathbf{x}_{\text{clean}}) + \mathbf{n}$. This preserves effective SNR through fading, making fading appear less harmful than in practice. A fully correct evaluation would require noiseless source signals.
+
+\textbf{Single-sample stochastic optimization.} Each PGD step uses an independent channel realization, not a multi-sample EoT gradient average. The observed gradient decorrelation is partly an artifact of this procedure.
+
+\textbf{Noise injection scope.} Our implementation is Gaussian data augmentation during training only, not full randomized smoothing with inference-time averaging.
+
+\textbf{Synthetic channels.} We use differentiable channel layers rather than over-the-air measurements. Real channels exhibit frequency-selective fading, time-varying coherence, and hardware nonlinearities.
+
+\textbf{Threat model scope.} A channel-adaptive adversary could achieve higher ASR than we report.
+
+\textbf{Dataset limitations.} The absence of 2018 transferability evaluation is a gap. RadioML 2016.10a has the known AM-SSB encoding artifact.
+
+\subsection{Future Work}
+
+Transferability analysis on 2018.01a, channel-aware adversarial attacks with channel estimation, over-the-air SDR validation, multi-sample EoT attacks, defense hyperparameter optimization (particularly the $\alpha$ balance for complex tasks), and certified robustness bounds for non-Gaussian channel noise models all merit investigation.
+
+
+% ================= SECTION 7 =================
+
+\section{Conclusion}
+
+This paper presented a systematic evaluation of adversarial robustness for deep learning-based RF modulation classifiers under realistic channel impairments, spanning RadioML 2016.10a (11 modulations) and 2018.01a (24 modulations). Using L2 norm-ratio perturbation constraints and correct SNR evaluation, we demonstrate:
+
+\begin{enumerate}
+\item Under AWGN, adversarial attacks at $\rho = 1\%$ ($-40$~dB power ratio) achieve 7--9\% ASR on 2016 and 31--35\% on 2018---both substantially lower than prior reports using different constraints. Adversarial vulnerability scales with task complexity.
+
+\item Channel impairments cause far more degradation than adversarial perturbations: fading reduces accuracy by 38--64 pp vs.\ 7--28 pp from PGD. The marginal damage of adversarial perturbations on top of channel degradation is modest, as fading decorrelates the adversarial gradient.
+
+\item Channel augmentation is the most efficient defense (largest ASR reduction per training hour). The combined defense achieves the lowest ASR---1.30\% on 2016 and 8.75\% on 2018---at approximately 6$\times$ the training cost.
+
+\item Per-class vulnerability varies from below 1\% ASR (OOK, BPSK) to 99.6\% (256-QAM), requiring modulation-specific risk assessment.
+
+\item The evaluation methodology correction (avoiding double-noising) is itself a contribution affecting the quantitative picture of adversarial vulnerability.
+\end{enumerate}
+
+For military organizations investing in cognitive EW capabilities, channel-robust classifier design should be prioritized alongside adversarial hardening, threat assessments based on norm-bounded attacks may overestimate vulnerability, and adversarial risk scales significantly with classification task complexity.
+
+
+% ================= ABOUT THE AUTHOR(S) =================
+
+\begin{biography}
+\textbf{Elijah Bellamy} is a graduate student at the United States Military Academy, West Point, NY. His research focuses on adversarial machine learning for radio frequency signal classification and cognitive electronic warfare applications.
+\end{biography}
+
+% ================= ACKNOWLEDGMENTS =================
+
+\begin{acks}
+The views expressed in this paper are those of the author and do not reflect the official policy or position of the United States Military Academy, the Department of the Army, or the Department of Defense. This research was supported by computational resources provided through Google Colab.
+\end{acks}
+
+% ================= BIBLIOGRAPHY =================
+
+\printbibliography[title=REFERENCES]
+
+
+\end{document}
