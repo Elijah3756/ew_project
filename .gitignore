@@ -10,3 +10,4 @@ env/
 data/
 experiments/
 .claude/
+.git_old/
