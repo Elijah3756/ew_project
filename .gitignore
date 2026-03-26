@@ -7,7 +7,8 @@ __pycache__/
 venv/
 env/
 .env
-data/
+# Large datasets only — keep package code in git so `import data` works after clone
+**/data/raw/
 experiments/
 .claude/
 .git_old/
