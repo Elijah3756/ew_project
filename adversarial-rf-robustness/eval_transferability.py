@@ -16,6 +16,7 @@ Usage:
 import os
 import sys
 import argparse
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -31,6 +32,7 @@ from channels.awgn import AWGNChannel
 from channels.composite import CompositeChannel
 from attacks.fgsm import fgsm_attack
 from attacks.pgd import pgd_attack
+from utils.progress import iter_batches, write_status
 
 
 def get_device(device_str="auto"):
@@ -53,7 +55,7 @@ def load_model(path, num_classes, input_length, device):
 
 def eval_transferability(source_model, target_model, test_loader, device,
                           snr_db=10, rho=0.01, attack_type="pgd", pgd_steps=10,
-                          num_trials=10):
+                          num_trials=10, progress=True, progress_file=None):
     """
     Generate adversarial examples using source_model, evaluate on target_model.
 
@@ -65,6 +67,7 @@ def eval_transferability(source_model, target_model, test_loader, device,
     attack_fn = pgd_attack if attack_type == "pgd" else fgsm_attack
 
     trial_results = []
+    t0 = time.time()
 
     for trial in range(num_trials):
         src_correct_clean, src_correct_adv = 0, 0
@@ -72,8 +75,8 @@ def eval_transferability(source_model, target_model, test_loader, device,
         src_fooled, tgt_fooled, both_fooled = 0, 0, 0
         src_fooled_tgt_correct = 0
         total = 0
-
-        for batch in test_loader:
+        desc = f"transfer SNR{snr_db:.0f} t{trial + 1}/{num_trials}"
+        for batch in iter_batches(test_loader, desc, progress):
             x = batch["iq"].to(device)
             y = batch["label"].to(device)
             snr_mask = (batch["snr"] >= snr_db - 1) & (batch["snr"] <= snr_db + 1)
@@ -144,6 +147,15 @@ def eval_transferability(source_model, target_model, test_loader, device,
             "transfer_rate": transfer_rate,
         })
 
+        write_status(
+            progress_file,
+            mode="transfer_trial",
+            snr_db=float(snr_db),
+            trial_index=trial + 1,
+            num_trials=num_trials,
+            elapsed_s=round(time.time() - t0, 1),
+        )
+
     if not trial_results:
         return {}
 
@@ -185,7 +197,17 @@ def main():
     parser.add_argument("--num_trials", type=int, default=10)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--output_dir", type=str, default="experiments/results")
+    parser.add_argument("--no-progress", action="store_true",
+                        help="Disable tqdm batch bars and eval_progress.json")
+    parser.add_argument("--progress-file", type=str, default=None,
+                        help="JSON status path (default: <output_dir>/transferability_progress.json)")
     args = parser.parse_args()
+
+    show_progress = not args.no_progress
+    progress_file = None
+    if show_progress:
+        progress_file = args.progress_file or os.path.join(
+            args.output_dir, "transferability_progress.json")
 
     device = get_device(args.device)
     print(f"Device: {device}")
@@ -207,6 +229,9 @@ def main():
         data_path=args.data_path, dataset_version=args.dataset_version,
         snr_range=None, batch_size=256, num_workers=0, seed=42)  # Load all SNRs; filtering done in eval
     print(f"Test set: {len(test_loader.dataset):,} samples")
+    if progress_file:
+        print(f"Progress status file: {progress_file}")
+    write_status(progress_file, mode="started", script="eval_transferability")
 
     # Run transferability analysis
     all_rows = []
@@ -220,7 +245,9 @@ def main():
             result = eval_transferability(
                 source_model, tgt_model, test_loader, device,
                 snr_db=snr, rho=args.rho, attack_type=args.attack,
-                pgd_steps=args.pgd_steps, num_trials=args.num_trials)
+                pgd_steps=args.pgd_steps, num_trials=args.num_trials,
+                progress=show_progress,
+                progress_file=progress_file)
 
             if result:
                 print(f"    White-box ASR (source): {result['source_asr']:.1%}")
@@ -232,12 +259,20 @@ def main():
                     "target": tgt_name,
                     **result,
                 })
+                write_status(
+                    progress_file,
+                    mode="transfer_pair_done",
+                    snr_db=float(snr),
+                    source=args.source_name,
+                    target=tgt_name,
+                )
 
     # Save results
     if all_rows:
         df = pd.DataFrame(all_rows)
         out_path = os.path.join(args.output_dir, "transferability_analysis.csv")
         df.to_csv(out_path, index=False)
+        write_status(progress_file, mode="complete", script="eval_transferability", rows=len(all_rows))
         print(f"\nResults saved to {out_path}")
 
         # Pretty summary table

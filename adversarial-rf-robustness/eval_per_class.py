@@ -11,6 +11,7 @@ Usage:
 import os
 import sys
 import argparse
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -31,6 +32,7 @@ from channels.composite import CompositeChannel
 from attacks.fgsm import fgsm_attack
 from attacks.pgd import pgd_attack
 from utils.metrics import compute_per_class_prf
+from utils.progress import iter_batches, write_status
 
 
 # Modulation labels by dataset version
@@ -64,7 +66,8 @@ def get_device(device_str="auto"):
 
 
 def eval_per_class(model, test_loader, device, snr_db=10.0, rho=0.01,
-                   attack_type="pgd", pgd_steps=10, num_trials=5):
+                   attack_type="pgd", pgd_steps=10, num_trials=5,
+                   progress=True, progress_file=None):
     """
     Per-class clean accuracy, robust accuracy, and ASR at a fixed SNR.
 
@@ -81,14 +84,15 @@ def eval_per_class(model, test_loader, device, snr_db=10.0, rho=0.01,
     # Accumulate per-trial, per-class results
     trial_data = {c: {"clean": [], "robust": [], "fooled": [], "total": []}
                   for c in range(num_classes)}
+    t0 = time.time()
 
     for trial in range(num_trials):
         class_correct_clean = [0] * num_classes
         class_correct_adv = [0] * num_classes
         class_fooled = [0] * num_classes
         class_total = [0] * num_classes
-
-        for batch in test_loader:
+        desc = f"per-class SNR{snr_db:.0f} t{trial + 1}/{num_trials}"
+        for batch in iter_batches(test_loader, desc, progress):
             x = batch["iq"].to(device)
             y = batch["label"].to(device)
 
@@ -135,6 +139,15 @@ def eval_per_class(model, test_loader, device, snr_db=10.0, rho=0.01,
                     class_fooled[c] / max(class_correct_clean[c], 1))
                 trial_data[c]["total"].append(class_total[c])
 
+        write_status(
+            progress_file,
+            mode="per_class_trials",
+            snr_db=float(snr_db),
+            trial_index=trial + 1,
+            num_trials=num_trials,
+            elapsed_s=round(time.time() - t0, 1),
+        )
+
     # Aggregate with 95% confidence intervals
     rows = []
     for c in range(num_classes):
@@ -169,7 +182,7 @@ def eval_per_class(model, test_loader, device, snr_db=10.0, rho=0.01,
 
 
 def eval_confusion_matrix(model, test_loader, device, snr_db=10.0, rho=0.01,
-                          attack_type="pgd", pgd_steps=10):
+                          attack_type="pgd", pgd_steps=10, progress=True):
     """
     Generate confusion matrices for clean and adversarial predictions.
 
@@ -181,7 +194,7 @@ def eval_confusion_matrix(model, test_loader, device, snr_db=10.0, rho=0.01,
     clean_cm = np.zeros((num_classes, num_classes), dtype=int)
     adv_cm = np.zeros((num_classes, num_classes), dtype=int)
 
-    for batch in test_loader:
+    for batch in iter_batches(test_loader, f"confusion SNR{snr_db:.0f}", progress):
         x = batch["iq"].to(device)
         y = batch["label"].to(device)
 
@@ -210,7 +223,7 @@ def eval_confusion_matrix(model, test_loader, device, snr_db=10.0, rho=0.01,
 
 
 def eval_per_class_prf(model, test_loader, device, snr_db=10.0, rho=0.01,
-                       attack_type="pgd", pgd_steps=10):
+                       attack_type="pgd", pgd_steps=10, progress=True):
     """
     Collect all predictions at a given SNR and compute per-class
     precision, recall, and F1 for both clean and adversarial settings.
@@ -222,7 +235,7 @@ def eval_per_class_prf(model, test_loader, device, snr_db=10.0, rho=0.01,
 
     all_y_true, all_clean_pred, all_adv_pred = [], [], []
 
-    for batch in test_loader:
+    for batch in iter_batches(test_loader, f"PRF SNR{snr_db:.0f}", progress):
         x = batch["iq"].to(device)
         y = batch["label"].to(device)
 
@@ -301,7 +314,16 @@ def main():
     parser.add_argument("--num_trials", type=int, default=10)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--output_dir", type=str, default="experiments/results")
+    parser.add_argument("--no-progress", action="store_true",
+                        help="Disable tqdm batch bars and eval_progress.json")
+    parser.add_argument("--progress-file", type=str, default=None,
+                        help="JSON status path (default: <output_dir>/eval_progress.json)")
     args = parser.parse_args()
+
+    show_progress = not args.no_progress
+    progress_file = None
+    if show_progress:
+        progress_file = args.progress_file or os.path.join(args.output_dir, "eval_progress.json")
 
     device = get_device(args.device)
     print(f"Device: {device}")
@@ -322,10 +344,13 @@ def main():
         data_path=args.data_path, dataset_version=args.dataset_version,
         snr_range=None, batch_size=256, num_workers=0, seed=42)  # Load all SNRs; filtering done in eval
     print(f"Test set: {len(test_loader.dataset):,} samples")
+    if progress_file:
+        print(f"Progress status file: {progress_file}")
+    write_status(progress_file, mode="started", script="eval_per_class")
 
     # Per-class analysis at each SNR
     all_dfs = []
-    for snr in args.snr:
+    for snr_i, snr in enumerate(args.snr):
         print(f"\n{'='*60}")
         print(f"Per-Class Analysis at SNR = {snr} dB ({args.attack.upper()}, rho={args.rho})")
         print(f"{'='*60}")
@@ -333,9 +358,18 @@ def main():
         df = eval_per_class(model, test_loader, device,
                             snr_db=snr, rho=args.rho,
                             attack_type=args.attack, pgd_steps=args.pgd_steps,
-                            num_trials=args.num_trials)
+                            num_trials=args.num_trials,
+                            progress=show_progress,
+                            progress_file=progress_file)
         df["snr"] = snr
         all_dfs.append(df)
+        write_status(
+            progress_file,
+            mode="per_class_snr_done",
+            snr_db=float(snr),
+            snr_index=snr_i + 1,
+            total_snrs=len(args.snr),
+        )
 
         # Pretty print with 95% CI
         print(f"\n{'Modulation':<12} {'Clean':>14} {'Robust':>14} {'ASR':>14} {'N':>6}")
@@ -365,7 +399,8 @@ def main():
     print("Generating confusion matrices at SNR=10 dB...")
     clean_cm, adv_cm = eval_confusion_matrix(
         model, test_loader, device, snr_db=10.0,
-        rho=args.rho, attack_type=args.attack, pgd_steps=args.pgd_steps)
+        rho=args.rho, attack_type=args.attack, pgd_steps=args.pgd_steps,
+        progress=show_progress)
 
     cm_path = os.path.join(args.output_dir, "confusion_matrices.npz")
     np.savez(cm_path, clean=clean_cm, adversarial=adv_cm, classes=MOD_CLASSES)
@@ -389,7 +424,8 @@ def main():
     print(f"{'='*60}")
     clean_prf, clean_report, adv_prf, adv_report = eval_per_class_prf(
         model, test_loader, device, snr_db=10.0,
-        rho=args.rho, attack_type=args.attack, pgd_steps=args.pgd_steps)
+        rho=args.rho, attack_type=args.attack, pgd_steps=args.pgd_steps,
+        progress=show_progress)
 
     print("\n--- Clean ---")
     print(clean_report)
@@ -399,6 +435,7 @@ def main():
     clean_prf.to_csv(os.path.join(args.output_dir, "per_class_prf_clean.csv"), index=False)
     adv_prf.to_csv(os.path.join(args.output_dir, "per_class_prf_adv.csv"), index=False)
     print(f"PRF tables saved to {args.output_dir}/per_class_prf_*.csv")
+    write_status(progress_file, mode="complete", script="eval_per_class")
 
 
 if __name__ == "__main__":

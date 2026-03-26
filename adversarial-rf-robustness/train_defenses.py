@@ -35,6 +35,7 @@ from channels.cfo import CFOChannel
 from channels.composite import CompositeChannel
 from attacks.pgd import pgd_attack
 from attacks.fgsm import fgsm_attack
+from utils.progress import iter_batches, write_status
 
 
 def get_device(device_str: str = "auto") -> torch.device:
@@ -178,7 +179,7 @@ def train_epoch_noise_injection(model, loader, optimizer, criterion, device,
 # ============================================================
 
 @torch.no_grad()
-def evaluate_clean(model, loader, device, snr_db=10.0):
+def evaluate_clean(model, loader, device, snr_db=10.0, progress=True):
     """
     Evaluate clean accuracy at a fixed SNR.
 
@@ -187,7 +188,7 @@ def evaluate_clean(model, loader, device, snr_db=10.0):
     """
     model.eval()
     correct, total = 0, 0
-    for batch in loader:
+    for batch in iter_batches(loader, f"defense-eval clean SNR{snr_db:.0f}", progress):
         x = batch["iq"].to(device)
         y = batch["label"].to(device)
         snr_vals = batch["snr"]
@@ -202,7 +203,8 @@ def evaluate_clean(model, loader, device, snr_db=10.0):
     return correct / total if total > 0 else 0.0
 
 
-def evaluate_robust(model, loader, device, rho=0.01, pgd_steps=10, snr_db=10.0):
+def evaluate_robust(model, loader, device, rho=0.01, pgd_steps=10, snr_db=10.0,
+                    progress=True):
     """
     Evaluate robust accuracy (PGD attack) at a fixed SNR.
 
@@ -211,7 +213,7 @@ def evaluate_robust(model, loader, device, rho=0.01, pgd_steps=10, snr_db=10.0):
     model.eval()
     correct_clean, correct_adv, total, fooled = 0, 0, 0, 0
 
-    for batch in loader:
+    for batch in iter_batches(loader, f"defense-eval PGD SNR{snr_db:.0f}", progress):
         x = batch["iq"].to(device)
         y = batch["label"].to(device)
         snr_vals = batch["snr"]
@@ -384,7 +386,17 @@ def main():
                         help="SNR values for defense evaluation")
     parser.add_argument("--defenses", type=str, nargs="+", default=None,
                         help="Only train these defenses (e.g. --defenses noise_inject)")
+    parser.add_argument("--no-progress", action="store_true",
+                        help="Disable tqdm during defense evaluation (clean + PGD)")
+    parser.add_argument("--progress-file", type=str, default=None,
+                        help="JSON status during defense eval (default: <output_dir>/defense_eval_progress.json)")
     args = parser.parse_args()
+
+    show_progress = not args.no_progress
+    progress_file = None
+    if show_progress:
+        progress_file = args.progress_file or os.path.join(
+            args.output_dir, "defense_eval_progress.json")
 
     device = get_device(args.device)
     print(f"Device: {device}")
@@ -490,19 +502,24 @@ def main():
         }
 
     comparison_rows = []
+    if progress_file:
+        print(f"Defense eval progress file: {progress_file}")
+    write_status(progress_file, mode="defense_eval_started", eval_snrs=[float(s) for s in args.eval_snr])
 
-    for snr in args.eval_snr:
+    for snr_i, snr in enumerate(args.eval_snr):
         print(f"\n  SNR = {snr} dB:")
         for name, info in trained.items():
             model = info["model"]
             model.eval()
 
             # Clean accuracy (filtered by native SNR, no double-noising)
-            clean_acc = evaluate_clean(model, test_loader, device, snr_db=snr)
+            clean_acc = evaluate_clean(model, test_loader, device, snr_db=snr,
+                                       progress=show_progress)
 
             # Robust accuracy (PGD-10, rho=1%, filtered by native SNR)
             robust = evaluate_robust(model, test_loader, device,
-                                     rho=args.rho, pgd_steps=10, snr_db=snr)
+                                     rho=args.rho, pgd_steps=10, snr_db=snr,
+                                     progress=show_progress)
 
             row = {
                 "defense": name,
@@ -517,11 +534,23 @@ def main():
 
             print(f"    {name:25s} | Clean: {clean_acc:.4f} | "
                   f"Robust: {robust['robust_acc']:.4f} | ASR: {robust['asr']:.4f}")
+            write_status(
+                progress_file,
+                mode="defense_eval_pair",
+                snr_db=float(snr),
+                snr_index=snr_i + 1,
+                total_snrs=len(args.eval_snr),
+                defense=name,
+                clean_acc=float(clean_acc),
+                robust_acc=float(robust["robust_acc"]),
+                asr=float(robust["asr"]),
+            )
 
     # Save comparison
     df = pd.DataFrame(comparison_rows)
     comp_path = os.path.join(args.output_dir, "defense_comparison.csv")
     df.to_csv(comp_path, index=False)
+    write_status(progress_file, mode="defense_eval_complete", rows=len(comparison_rows))
     print(f"\nDefense comparison saved to: {comp_path}")
 
     # Summary table

@@ -26,17 +26,17 @@ import os
 import sys
 import argparse
 import json
+import time
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pandas as pd
 from scipy import stats
-from tqdm import tqdm
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data.dataset import RadioMLDataset, get_dataloaders
+from utils.progress import iter_batches, write_status
 from models.cnn import RFClassifierCNN
 from channels.awgn import AWGNChannel
 from channels.rayleigh import RayleighFadingChannel
@@ -184,7 +184,8 @@ def _compute_ci(values, confidence=0.95):
 # ============================================================
 # Evaluation Mode 1: Clean Accuracy vs SNR
 # ============================================================
-def eval_clean_snr(model, test_loader, device, snr_values, channel_types=None, num_trials=10):
+def eval_clean_snr(model, test_loader, device, snr_values, channel_types=None, num_trials=10,
+                   progress=True, progress_file=None):
     """
     Evaluate clean accuracy across SNR for multiple channel configs.
 
@@ -200,17 +201,19 @@ def eval_clean_snr(model, test_loader, device, snr_values, channel_types=None, n
         channel_types = ["awgn", "rayleigh_awgn", "rayleigh_cfo_awgn"]
 
     all_results = {}
+    t0 = time.time()
 
     for ch_type in channel_types:
         print(f"\n  Channel: {ch_type}")
         channel = build_channel_native(ch_type, device)
         snr_accs = {}
 
-        for snr in snr_values:
+        for snr_i, snr in enumerate(snr_values):
             trial_accs = []
             for trial in range(num_trials):
                 correct, total = 0, 0
-                for batch in test_loader:
+                desc = f"{ch_type} SNR{snr:+d}dB t{trial + 1}/{num_trials}"
+                for batch in iter_batches(test_loader, desc, progress):
                     x, y = _filter_by_snr(batch, snr, device)
                     if x is None:
                         continue
@@ -237,6 +240,16 @@ def eval_clean_snr(model, test_loader, device, snr_values, channel_types=None, n
             mean_acc, std_acc, ci95 = _compute_ci(trial_accs)
             snr_accs[snr] = {"mean": mean_acc, "std": std_acc, "ci95": ci95}
             print(f"    SNR {snr:+3d} dB: {mean_acc:.4f} +/- {std_acc:.4f} (CI95: {ci95:.4f})")
+            write_status(
+                progress_file,
+                mode="clean_snr",
+                channel=ch_type,
+                snr_db=float(snr),
+                snr_index=snr_i + 1,
+                total_snrs=len(snr_values),
+                accuracy_mean=float(mean_acc),
+                elapsed_s=round(time.time() - t0, 1),
+            )
 
         all_results[ch_type] = snr_accs
 
@@ -248,7 +261,7 @@ def eval_clean_snr(model, test_loader, device, snr_values, channel_types=None, n
 # ============================================================
 def eval_attack_snr(model, test_loader, device, snr_values, attack_type="pgd",
                     rho=0.01, channel_type="awgn", pgd_steps=10, num_trials=10,
-                    freeze_channel=False):
+                    freeze_channel=False, progress=True, progress_file=None):
     """
     Evaluate attack success rate and robust accuracy across SNR.
 
@@ -269,13 +282,14 @@ def eval_attack_snr(model, test_loader, device, snr_values, attack_type="pgd",
     attack_fn = pgd_attack if attack_type == "pgd" else fgsm_attack
 
     results = {}
+    t0 = time.time()
 
-    for snr in snr_values:
+    for snr_i, snr in enumerate(snr_values):
         trial_results = []
         for trial in range(num_trials):
             correct_clean, correct_adv, total, fooled = 0, 0, 0, 0
-
-            for batch in test_loader:
+            desc = f"attack({attack_type}) {channel_type} SNR{snr:+d} t{trial + 1}/{num_trials}"
+            for batch in iter_batches(test_loader, desc, progress):
                 x, y = _filter_by_snr(batch, snr, device)
                 if x is None:
                     continue
@@ -362,6 +376,19 @@ def eval_attack_snr(model, test_loader, device, snr_values, attack_type="pgd",
         }
         print(f"  SNR {snr:+3d} dB | Clean: {clean_mean:.4f} | "
               f"Robust: {robust_mean:.4f} | ASR: {asr_mean:.4f}")
+        write_status(
+            progress_file,
+            mode="attack_snr",
+            attack=attack_type,
+            channel=channel_type,
+            snr_db=float(snr),
+            snr_index=snr_i + 1,
+            total_snrs=len(snr_values),
+            clean_acc=float(clean_mean),
+            robust_acc=float(robust_mean),
+            asr=float(asr_mean),
+            elapsed_s=round(time.time() - t0, 1),
+        )
 
     return results
 
@@ -371,7 +398,7 @@ def eval_attack_snr(model, test_loader, device, snr_values, attack_type="pgd",
 # ============================================================
 def eval_attack_budget(model, test_loader, device, rho_values, snr_values_fixed,
                        attack_type="pgd", channel_type="awgn", pgd_steps=10, num_trials=10,
-                       freeze_channel=False):
+                       freeze_channel=False, progress=True, progress_file=None):
     """
     Evaluate attack success across perturbation budgets at fixed SNR values.
 
@@ -382,19 +409,23 @@ def eval_attack_budget(model, test_loader, device, rho_values, snr_values_fixed,
     attack_fn = pgd_attack if attack_type == "pgd" else fgsm_attack
 
     results = {}
+    t0 = time.time()
 
     for snr in snr_values_fixed:
         results[snr] = {}
         print(f"\n  SNR = {snr} dB:")
 
-        for rho in rho_values:
+        for rho_i, rho in enumerate(rho_values):
             trial_asrs = []
             trial_robust = []
 
             for trial in range(num_trials):
                 correct_clean, correct_adv, total, fooled = 0, 0, 0, 0
-
-                for batch in test_loader:
+                desc = (
+                    f"budget({attack_type}) SNR{snr} rho{rho * 100:.1f}% "
+                    f"t{trial + 1}/{num_trials}"
+                )
+                for batch in iter_batches(test_loader, desc, progress):
                     x, y = _filter_by_snr(batch, snr, device)
                     if x is None:
                         continue
@@ -453,6 +484,19 @@ def eval_attack_budget(model, test_loader, device, rho_values, snr_values_fixed,
             }
             print(f"    rho={rho*100:.1f}% | ASR: {asr_mean:.4f} | "
                   f"Robust Acc: {rob_mean:.4f}")
+            write_status(
+                progress_file,
+                mode="attack_budget",
+                attack=attack_type,
+                channel=channel_type,
+                snr_db=float(snr),
+                rho=float(rho),
+                rho_index=rho_i + 1,
+                total_rhos=len(rho_values),
+                asr=float(asr_mean),
+                robust_acc=float(rob_mean),
+                elapsed_s=round(time.time() - t0, 1),
+            )
 
     return results
 
@@ -485,6 +529,10 @@ def main():
                         help="Path to training config JSON (honors snr_range, batch_size, etc.)")
     parser.add_argument("--freeze-channel", action="store_true", default=False,
                         help="For PGD attacks: freeze channel realization during optimization (perfect CSI)")
+    parser.add_argument("--no-progress", action="store_true",
+                        help="Disable tqdm batch bars and eval_progress.json status snapshots")
+    parser.add_argument("--progress-file", type=str, default=None,
+                        help="Where to write JSON status (default: <output_dir>/eval_progress.json)")
     args = parser.parse_args()
 
     # Load config if provided and apply missing args
@@ -510,6 +558,11 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    show_progress = not args.no_progress
+    progress_file = None
+    if show_progress:
+        progress_file = args.progress_file or os.path.join(args.output_dir, "eval_progress.json")
+
     # Load model
     model = load_model(args.model_path, args.num_classes, args.input_length, device)
 
@@ -523,6 +576,9 @@ def main():
         seed=args.seed,
     )
     print(f"Test samples: {len(test_loader.dataset):,}")
+    if progress_file:
+        print(f"Progress status file: {progress_file}")
+    write_status(progress_file, mode="started", eval_mode=args.eval_mode, device=str(device))
 
     # SNR values to evaluate (RadioML uses 2dB steps)
     if args.snr_values is not None:
@@ -542,6 +598,8 @@ def main():
             model, test_loader, device, snr_values,
             channel_types=["awgn", "rayleigh_awgn", "rayleigh_cfo_awgn"],
             num_trials=args.num_trials,
+            progress=show_progress,
+            progress_file=progress_file,
         )
         # Save
         for ch_type, snr_accs in clean_results.items():
@@ -566,6 +624,8 @@ def main():
             pgd_steps=args.pgd_steps,
             num_trials=args.num_trials,
             freeze_channel=args.freeze_channel,
+            progress=show_progress,
+            progress_file=progress_file,
         )
         df = pd.DataFrame([
             {"snr": snr, **vals}
@@ -588,6 +648,8 @@ def main():
             pgd_steps=args.pgd_steps,
             num_trials=args.num_trials,
             freeze_channel=args.freeze_channel,
+            progress=show_progress,
+            progress_file=progress_file,
         )
         rows = []
         for snr, rho_dict in budget_results.items():
@@ -598,6 +660,7 @@ def main():
         df.to_csv(os.path.join(args.output_dir, fname), index=False)
         print(f"\nSaved to {args.output_dir}/{fname}")
 
+    write_status(progress_file, mode="complete", eval_mode=args.eval_mode)
     print("\n" + "=" * 60)
     print("EVALUATION COMPLETE")
     print("=" * 60)
