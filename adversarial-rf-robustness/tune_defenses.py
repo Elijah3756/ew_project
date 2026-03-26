@@ -1,226 +1,268 @@
 #!/usr/bin/env python3
 """
-Sweep defense-specific hyperparameters for train_defenses.py.
+Grid search helper for train_defenses.py.
 
-Tunes:
-  - adv_train / adv_train_channel: rho, pgd_steps
-  - noise_inject / noise_inject_channel: sigma
-
-Each run trains a SINGLE defense and records defense_comparison.csv.
-Selection metric: robust_acc at the highest eval SNR.
-
-Usage:
-  python tune_defenses.py \
-    --data_path data/raw/RML2016.10a_dict.pkl \
-    --rho 0.005 0.01 0.02 \
-    --pgd_steps 3 5 7 \
-    --sigma 0.005 0.01 0.02 \
-    --output_root experiments/tune_defenses
+Runs one defense at a time with --skip_defense_eval so tuning optimizes
+validation-driven training quality rather than the expensive post-training
+comparison stage.
 """
 
 from __future__ import annotations
 
 import argparse
 import itertools
+import json
+import math
 import os
 import subprocess
 import sys
+from typing import Any
 
 import pandas as pd
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-TRAIN_DEFENSES = os.path.join(SCRIPT_DIR, "train_defenses.py")
+TRAIN_DEFENSES_PY = os.path.join(SCRIPT_DIR, "train_defenses.py")
 
 
-def _tag(*parts: str) -> str:
-    return "_".join(str(p) for p in parts).replace(".", "p").replace("-", "m")
+def _safe_value(value: float | int) -> str:
+    return f"{value:g}".replace(".", "p").replace("-", "m")
 
 
-def _run_defense(
+def build_defense_search_spaces(
+    shared: dict[str, list[Any]],
+    rho_values: list[float],
+    pgd_steps_values: list[int],
+    sigma_values: list[float],
+) -> dict[str, list[dict[str, Any]]]:
+    shared_combos = [
+        {
+            "lr": float(lr),
+            "batch_size": int(batch_size),
+            "epochs": int(epochs),
+            "weight_decay": float(weight_decay),
+        }
+        for lr, batch_size, epochs, weight_decay in itertools.product(
+            shared["lr"],
+            shared["batch_size"],
+            shared["epochs"],
+            shared["weight_decay"],
+        )
+    ]
+
+    spaces: dict[str, list[dict[str, Any]]] = {
+        "channel_aug": [cfg.copy() for cfg in shared_combos],
+    }
+
+    spaces["adv_train"] = [
+        {**cfg, "rho": float(rho), "pgd_steps": int(pgd_steps)}
+        for cfg in shared_combos
+        for rho, pgd_steps in itertools.product(rho_values, pgd_steps_values)
+    ]
+    spaces["adv_train_channel"] = [cfg.copy() for cfg in spaces["adv_train"]]
+
+    spaces["noise_inject"] = [
+        {**cfg, "sigma": float(sigma)}
+        for cfg in shared_combos
+        for sigma in sigma_values
+    ]
+    spaces["noise_inject_channel"] = [cfg.copy() for cfg in spaces["noise_inject"]]
+
+    return spaces
+
+
+def rank_top_results(df: pd.DataFrame, top_k: int) -> list[dict[str, Any]]:
+    ok = df[df["status"] == "ok"].copy()
+    if len(ok) == 0:
+        return []
+    ok = ok.sort_values(
+        ["best_val_acc", "defense", "epochs"],
+        ascending=[False, True, True],
+    )
+    return ok.head(top_k).to_dict(orient="records")
+
+
+def best_results_by_defense(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    ok = df[df["status"] == "ok"].copy()
+    if len(ok) == 0:
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for defense in sorted(ok["defense"].unique()):
+        ddf = ok[ok["defense"] == defense].copy()
+        ddf = ddf.sort_values(["best_val_acc"], ascending=[False])
+        result[defense] = _clean_record(ddf.iloc[0].to_dict())
+    return result
+
+
+def _clean_record(record: dict[str, Any]) -> dict[str, Any]:
+    cleaned = {}
+    for key, value in record.items():
+        if isinstance(value, float) and math.isnan(value):
+            cleaned[key] = None
+        else:
+            cleaned[key] = value
+    return cleaned
+
+
+def _tag_for_config(config: dict[str, Any]) -> str:
+    pieces = [
+        f"lr{_safe_value(config['lr'])}",
+        f"bs{_safe_value(config['batch_size'])}",
+        f"ep{_safe_value(config['epochs'])}",
+        f"wd{_safe_value(config['weight_decay'])}",
+    ]
+    if "rho" in config:
+        pieces.append(f"rho{_safe_value(config['rho'])}")
+    if "pgd_steps" in config:
+        pieces.append(f"pgd{_safe_value(config['pgd_steps'])}")
+    if "sigma" in config:
+        pieces.append(f"sigma{_safe_value(config['sigma'])}")
+    return "_".join(pieces)
+
+
+def _run_one_trial(
     defense: str,
-    data_path: str,
-    dataset_version: str,
-    num_classes: int,
-    input_length: int,
-    epochs: int,
-    batch_size: int,
-    lr: float,
-    seed: int,
-    device: str,
-    output_dir: str,
-    eval_snr: list[float],
-    rho: float = 0.01,
-    pgd_steps: int = 5,
-    sigma: float = 0.01,
-) -> int:
+    config: dict[str, Any],
+    args: argparse.Namespace,
+    output_root: str,
+) -> dict[str, Any]:
+    tag = _tag_for_config(config)
+    trial_root = os.path.join(output_root, defense, tag)
     cmd = [
         sys.executable,
-        TRAIN_DEFENSES,
-        "--data_path", data_path,
-        "--dataset_version", dataset_version,
-        "--num_classes", str(num_classes),
-        "--input_length", str(input_length),
-        "--epochs", str(epochs),
-        "--batch_size", str(batch_size),
-        "--lr", str(lr),
-        "--seed", str(seed),
-        "--device", device,
-        "--rho", str(rho),
-        "--pgd_steps", str(pgd_steps),
-        "--sigma", str(sigma),
-        "--output_dir", output_dir,
-        "--eval_snr", *[str(s) for s in eval_snr],
-        "--defenses", defense,
+        TRAIN_DEFENSES_PY,
+        "--data_path",
+        args.data_path,
+        "--dataset_version",
+        args.dataset_version,
+        "--num_classes",
+        str(args.num_classes),
+        "--input_length",
+        str(args.input_length),
+        "--epochs",
+        str(config["epochs"]),
+        "--batch_size",
+        str(config["batch_size"]),
+        "--lr",
+        str(config["lr"]),
+        "--weight_decay",
+        str(config["weight_decay"]),
+        "--seed",
+        str(args.seed),
+        "--device",
+        args.device,
+        "--output_dir",
+        trial_root,
+        "--defenses",
+        defense,
+        "--skip_defense_eval",
+        "--no-progress",
     ]
+    if "rho" in config:
+        cmd.extend(["--rho", str(config["rho"])])
+    if "pgd_steps" in config:
+        cmd.extend(["--pgd_steps", str(config["pgd_steps"])])
+    if "sigma" in config:
+        cmd.extend(["--sigma", str(config["sigma"])])
+
     r = subprocess.run(cmd, cwd=SCRIPT_DIR)
-    return r.returncode
+    result = {"defense": defense, "trial_root": trial_root, **config}
+    if r.returncode != 0:
+        result.update({"best_val_acc": None, "status": f"failed_exit_{r.returncode}"})
+        return result
 
+    history_path = os.path.join(trial_root, defense, "training_history.csv")
+    run_config_path = os.path.join(trial_root, defense, "run_config.json")
+    if not os.path.isfile(history_path):
+        result.update({"best_val_acc": None, "status": "missing_history"})
+        return result
 
-def _read_best_robust(output_dir: str, defense: str, eval_snr: list[float]) -> dict | None:
-    csv_path = os.path.join(output_dir, "defense_comparison.csv")
-    if not os.path.isfile(csv_path):
-        return None
-    df = pd.read_csv(csv_path)
-    df = df[df["defense"] == defense]
-    if df.empty:
-        return None
-    max_snr = max(eval_snr)
-    row = df[df["snr"] == max_snr]
-    if row.empty:
-        row = df.iloc[-1:]
-    row = row.iloc[0]
-    return {
-        "clean_acc": float(row["clean_acc"]),
-        "robust_acc": float(row["robust_acc"]),
-        "asr": float(row["attack_success_rate"]),
-    }
+    hist = pd.read_csv(history_path)
+    result["best_val_acc"] = float(hist["val_acc"].max())
+    result["final_val_acc"] = float(hist["val_acc"].iloc[-1])
+    result["status"] = "ok"
+    if os.path.isfile(run_config_path):
+        with open(run_config_path, "r") as f:
+            metadata = json.load(f)
+        result["train_time_s"] = metadata.get("train_time_s")
+    return result
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Sweep defense hyperparameters")
-    p.add_argument("--data_path", type=str, default="data/raw/RML2016.10a_dict.pkl")
-    p.add_argument("--dataset_version", type=str, default="2016.10a")
-    p.add_argument("--num_classes", type=int, default=11)
-    p.add_argument("--input_length", type=int, default=128)
-    p.add_argument("--epochs", type=int, default=60)
-    p.add_argument("--batch_size", type=int, default=256)
-    p.add_argument("--lr", type=float, default=0.001)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--device", type=str, default="auto")
-    p.add_argument("--eval_snr", type=float, nargs="+", default=[0, 10])
-    p.add_argument("--output_root", type=str, default="experiments/tune_defenses")
-    p.add_argument(
-        "--rho", type=float, nargs="+", default=[0.005, 0.01, 0.02],
-        help="PGD rho values to sweep for adv_train",
+    parser = argparse.ArgumentParser(description="Grid search over defense training settings")
+    parser.add_argument("--data_path", type=str, default="data/raw/RML2016.10a_dict.pkl")
+    parser.add_argument("--dataset_version", type=str, default="2016.10a")
+    parser.add_argument("--num_classes", type=int, default=11)
+    parser.add_argument("--input_length", type=int, default=128)
+    parser.add_argument("--lr", type=float, nargs="+", default=[1e-3, 5e-4])
+    parser.add_argument("--batch_size", type=int, nargs="+", default=[128, 256])
+    parser.add_argument("--epochs", type=int, nargs="+", default=[60, 100])
+    parser.add_argument("--weight_decay", type=float, nargs="+", default=[1e-4])
+    parser.add_argument("--rho", type=float, nargs="+", default=[0.005, 0.01, 0.02])
+    parser.add_argument("--pgd_steps", type=int, nargs="+", default=[3, 5, 7])
+    parser.add_argument("--sigma", type=float, nargs="+", default=[0.005, 0.01, 0.02])
+    parser.add_argument(
+        "--defenses",
+        type=str,
+        nargs="+",
+        default=None,
+        choices=["adv_train", "noise_inject", "channel_aug", "adv_train_channel", "noise_inject_channel"],
     )
-    p.add_argument(
-        "--pgd_steps", type=int, nargs="+", default=[3, 5, 7],
-        help="PGD inner steps to sweep for adv_train",
-    )
-    p.add_argument(
-        "--sigma", type=float, nargs="+", default=[0.005, 0.01, 0.02],
-        help="Noise std values to sweep for noise_inject",
-    )
-    args = p.parse_args()
+    parser.add_argument("--output_root", type=str, default="experiments/tune_defenses")
+    parser.add_argument("--search_name", type=str, default="grid")
+    parser.add_argument("--top_k_summary", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="auto")
+    args = parser.parse_args()
 
     os.makedirs(args.output_root, exist_ok=True)
-    rows: list[dict] = []
+    search_root = os.path.join(args.output_root, args.search_name)
+    os.makedirs(search_root, exist_ok=True)
 
-    # --- Adversarial training sweep (rho x pgd_steps) ---
-    adv_combos = list(itertools.product(args.rho, args.pgd_steps))
-    print(f"Adv training sweep: {len(adv_combos)} combos (rho x pgd_steps)")
+    spaces = build_defense_search_spaces(
+        shared={
+            "lr": args.lr,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "weight_decay": args.weight_decay,
+        },
+        rho_values=args.rho,
+        pgd_steps_values=args.pgd_steps,
+        sigma_values=args.sigma,
+    )
+    selected = args.defenses or list(spaces.keys())
 
-    for i, (rho, steps) in enumerate(adv_combos):
-        tag = _tag("adv", f"rho{rho}", f"steps{steps}")
-        out = os.path.join(args.output_root, tag)
+    rows: list[dict[str, Any]] = []
+    for defense in selected:
+        configs = spaces[defense]
+        print(f"\n=== {defense} ({len(configs)} runs) ===")
+        for i, config in enumerate(configs):
+            print(f"[{i + 1}/{len(configs)}] {defense} -> {_tag_for_config(config)}")
+            rows.append(_run_one_trial(defense, config, args, search_root))
 
-        print(f"\n[adv {i + 1}/{len(adv_combos)}] rho={rho} pgd_steps={steps} -> {out}")
-        rc = _run_defense(
-            defense="adv_train",
-            data_path=args.data_path,
-            dataset_version=args.dataset_version,
-            num_classes=args.num_classes,
-            input_length=args.input_length,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            lr=args.lr,
-            seed=args.seed,
-            device=args.device,
-            output_dir=out,
-            eval_snr=args.eval_snr,
-            rho=rho,
-            pgd_steps=steps,
-        )
-        metrics = _read_best_robust(out, "adv_train", args.eval_snr) if rc == 0 else None
-        rows.append({
-            "defense": "adv_train",
-            "rho": rho,
-            "pgd_steps": steps,
-            "sigma": None,
-            "save_dir": out,
-            **(metrics or {"clean_acc": None, "robust_acc": None, "asr": None}),
-            "status": "ok" if rc == 0 and metrics else f"fail_{rc}",
-        })
-
-    # --- Noise injection sweep (sigma) ---
-    print(f"\nNoise injection sweep: {len(args.sigma)} sigma values")
-
-    for i, sigma in enumerate(args.sigma):
-        tag = _tag("noise", f"sigma{sigma}")
-        out = os.path.join(args.output_root, tag)
-
-        print(f"\n[noise {i + 1}/{len(args.sigma)}] sigma={sigma} -> {out}")
-        rc = _run_defense(
-            defense="noise_inject",
-            data_path=args.data_path,
-            dataset_version=args.dataset_version,
-            num_classes=args.num_classes,
-            input_length=args.input_length,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            lr=args.lr,
-            seed=args.seed,
-            device=args.device,
-            output_dir=out,
-            eval_snr=args.eval_snr,
-            sigma=sigma,
-        )
-        metrics = _read_best_robust(out, "noise_inject", args.eval_snr) if rc == 0 else None
-        rows.append({
-            "defense": "noise_inject",
-            "rho": None,
-            "pgd_steps": None,
-            "sigma": sigma,
-            "save_dir": out,
-            **(metrics or {"clean_acc": None, "robust_acc": None, "asr": None}),
-            "status": "ok" if rc == 0 and metrics else f"fail_{rc}",
-        })
-
-    # --- Save and display ---
     df = pd.DataFrame(rows)
-    csv_out = os.path.join(args.output_root, "tune_defense_results.csv")
-    df.to_csv(csv_out, index=False)
+    out_csv = os.path.join(search_root, f"{args.search_name}_results.csv")
+    df.to_csv(out_csv, index=False)
 
-    ok = df[df["status"] == "ok"].copy()
-    if ok.empty:
-        print("\nNo successful runs. Check tune_defense_results.csv")
+    ranked = rank_top_results(df, top_k=args.top_k_summary)
+    if not ranked:
+        print(f"\nNo successful defense tuning runs. See {out_csv}")
         return
 
-    print("\n" + "=" * 70)
-    print("DEFENSE TUNING RESULTS (sorted by robust_acc)")
-    print("=" * 70)
-
-    for defense in ["adv_train", "noise_inject"]:
-        sub = ok[ok["defense"] == defense].sort_values("robust_acc", ascending=False)
-        if sub.empty:
-            continue
-        print(f"\n--- {defense} ---")
-        cols = ["rho", "pgd_steps", "sigma", "clean_acc", "robust_acc", "asr"]
-        print(sub[cols].to_string(index=False))
-        best = sub.iloc[0]
-        print(f"  Best: robust_acc={best['robust_acc']:.4f}")
-
-    print(f"\nFull table: {csv_out}")
+    print("\n--- Top defense configurations ---")
+    print(pd.DataFrame(ranked).to_string(index=False))
+    best_path = os.path.join(search_root, f"best_{args.search_name}.json")
+    with open(best_path, "w") as f:
+        json.dump(_clean_record(ranked[0]), f, indent=2)
+    top_path = os.path.join(search_root, f"top_{args.search_name}.json")
+    with open(top_path, "w") as f:
+        json.dump([_clean_record(row) for row in ranked], f, indent=2)
+    best_by_defense_path = os.path.join(search_root, f"best_by_defense_{args.search_name}.json")
+    with open(best_by_defense_path, "w") as f:
+        json.dump(best_results_by_defense(df), f, indent=2)
+    print(f"\nFull table: {out_csv}")
+    print(f"Best config: {best_path}")
+    print(f"Best by defense: {best_by_defense_path}")
 
 
 if __name__ == "__main__":

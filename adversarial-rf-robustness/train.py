@@ -183,7 +183,7 @@ def evaluate_snr_sweep(model, loader, device, snr_values):
     return results
 
 
-def main():
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train RF Modulation Classifier")
     parser.add_argument("--config", type=str, default=None, help="Path to YAML config")
     parser.add_argument("--data_path", type=str, default="data/raw/RML2016.10a_dict.pkl")
@@ -203,8 +203,13 @@ def main():
     parser.add_argument(
         "--skip_snr_sweep",
         action="store_true",
-        help="Skip test-set SNR sweep after training (faster hyperparameter search)",
+        help="Skip post-training clean SNR sweep (useful for tuning runs).",
     )
+    return parser
+
+
+def main():
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     # Load config if provided
@@ -346,8 +351,11 @@ def main():
     import pandas as pd
     pd.DataFrame(history).to_csv(os.path.join(save_dir, "training_history.csv"), index=False)
 
-    # SNR sweep evaluation on test set (optional; skipped for fast hyperparameter search)
-    if not args.skip_snr_sweep:
+    if args.skip_snr_sweep:
+        print("\nSkipping clean SNR sweep (--skip_snr_sweep).")
+    else:
+        # SNR sweep evaluation on test set (filtered by native SNR labels)
+        # Reload test set with ALL SNRs for full sweep
         print("\nRunning SNR sweep evaluation on test set...")
         from data.dataset import RadioMLDataset
         from torch.utils.data import DataLoader
@@ -363,6 +371,7 @@ def main():
 
         snr_results_clean = evaluate_snr_sweep(model, test_loader_full, device, snr_values)
 
+        # Save SNR results
         snr_df = pd.DataFrame([
             {"snr": snr, "accuracy": acc}
             for snr, acc in snr_results_clean.items()
@@ -373,8 +382,6 @@ def main():
         for snr, acc in sorted(snr_results_clean.items()):
             bar = "#" * int(acc * 50)
             print(f"  SNR {snr:+3d} dB: {acc:.4f}  {bar}")
-    else:
-        print("\nSkipping test SNR sweep (--skip_snr_sweep).")
 
     # Save config used
     with open(os.path.join(save_dir, "config.json"), "w") as f:

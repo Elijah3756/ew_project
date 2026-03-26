@@ -255,7 +255,7 @@ def evaluate_robust(model, loader, device, rho=0.01, pgd_steps=10, snr_db=10.0,
 # ============================================================
 
 def train_model(defense_type, train_loader, val_loader, device, save_dir,
-                epochs=60, lr=0.001, seed=42, snr_range=(-10, 18),
+                epochs=60, lr=0.001, weight_decay=1e-4, seed=42, snr_range=(-10, 18),
                 num_classes=11, input_length=128, **kwargs):
     """Train a model with the specified defense."""
     set_seed(seed)
@@ -263,7 +263,7 @@ def train_model(defense_type, train_loader, val_loader, device, save_dir,
 
     model = RFClassifierCNN(num_classes=num_classes, input_length=input_length).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
 
     # Build channel for augmentation-based defenses
@@ -360,6 +360,21 @@ def train_model(defense_type, train_loader, val_loader, device, save_dir,
         "defense_type": defense_type,
     }, os.path.join(save_dir, "final_model.pth"))
 
+    metadata = {
+        "defense_type": defense_type,
+        "epochs": epochs,
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "seed": seed,
+        "num_classes": num_classes,
+        "input_length": input_length,
+        "best_val_acc": best_val_acc,
+        "train_time_s": total_time,
+        "kwargs": kwargs,
+    }
+    with open(os.path.join(save_dir, "run_config.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+
     return model, total_time, best_val_acc
 
 
@@ -376,6 +391,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--rho", type=float, default=0.01, help="PGD budget for adv training")
@@ -386,6 +402,8 @@ def main():
                         help="SNR values for defense evaluation")
     parser.add_argument("--defenses", type=str, nargs="+", default=None,
                         help="Only train these defenses (e.g. --defenses noise_inject)")
+    parser.add_argument("--skip_defense_eval", action="store_true",
+                        help="Skip post-training defense comparison (useful during tuning)")
     parser.add_argument("--no-progress", action="store_true",
                         help="Disable tqdm during defense evaluation (clean + PGD)")
     parser.add_argument("--progress-file", type=str, default=None,
@@ -450,6 +468,7 @@ def main():
             save_dir=save_dir,
             epochs=args.epochs,
             lr=args.lr,
+            weight_decay=args.weight_decay,
             seed=args.seed,
             num_classes=args.num_classes,
             input_length=args.input_length,
@@ -461,6 +480,23 @@ def main():
             "best_val": best_val,
             "params": model.get_param_count(),
         }
+
+    if args.skip_defense_eval:
+        print("\nSkipping defense comparison after training.")
+        summary_rows = [
+            {
+                "defense": name,
+                "best_val_acc": info["best_val"],
+                "train_time_s": info["train_time"],
+                "params": info["params"],
+            }
+            for name, info in trained.items()
+        ]
+        summary_df = pd.DataFrame(summary_rows).sort_values("best_val_acc", ascending=False)
+        summary_path = os.path.join(args.output_dir, "defense_tuning_summary.csv")
+        summary_df.to_csv(summary_path, index=False)
+        print(f"Defense tuning summary saved to: {summary_path}")
+        return
 
     # Load ALL existing defense checkpoints for evaluation (not just newly trained ones)
     print(f"\n{'='*60}")
