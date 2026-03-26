@@ -200,6 +200,11 @@ def main():
     parser.add_argument("--snr_max", type=int, default=18)
     parser.add_argument("--channel_aug", action="store_true", help="Enable channel augmentation")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument(
+        "--skip_snr_sweep",
+        action="store_true",
+        help="Skip test-set SNR sweep after training (faster hyperparameter search)",
+    )
     args = parser.parse_args()
 
     # Load config if provided
@@ -341,34 +346,35 @@ def main():
     import pandas as pd
     pd.DataFrame(history).to_csv(os.path.join(save_dir, "training_history.csv"), index=False)
 
-    # SNR sweep evaluation on test set (filtered by native SNR labels)
-    # Reload test set with ALL SNRs for full sweep
-    print("\nRunning SNR sweep evaluation on test set...")
-    from data.dataset import RadioMLDataset
-    from torch.utils.data import DataLoader
-    test_ds_full = RadioMLDataset(
-        data_path=data_path, dataset_version=dataset_version,
-        snr_range=None, split="test", seed=seed)
-    test_loader_full = DataLoader(test_ds_full, batch_size=batch_size, shuffle=False,
-                                   num_workers=0)
-    if dataset_version == "2018.01a":
-        snr_values = list(range(-20, 32, 2))
+    # SNR sweep evaluation on test set (optional; skipped for fast hyperparameter search)
+    if not args.skip_snr_sweep:
+        print("\nRunning SNR sweep evaluation on test set...")
+        from data.dataset import RadioMLDataset
+        from torch.utils.data import DataLoader
+        test_ds_full = RadioMLDataset(
+            data_path=data_path, dataset_version=dataset_version,
+            snr_range=None, split="test", seed=seed)
+        test_loader_full = DataLoader(test_ds_full, batch_size=batch_size, shuffle=False,
+                                       num_workers=0)
+        if dataset_version == "2018.01a":
+            snr_values = list(range(-20, 32, 2))
+        else:
+            snr_values = list(range(-20, 20, 2))
+
+        snr_results_clean = evaluate_snr_sweep(model, test_loader_full, device, snr_values)
+
+        snr_df = pd.DataFrame([
+            {"snr": snr, "accuracy": acc}
+            for snr, acc in snr_results_clean.items()
+        ])
+        snr_df.to_csv(os.path.join(save_dir, "snr_sweep_clean.csv"), index=False)
+
+        print("\nClean Accuracy vs SNR:")
+        for snr, acc in sorted(snr_results_clean.items()):
+            bar = "#" * int(acc * 50)
+            print(f"  SNR {snr:+3d} dB: {acc:.4f}  {bar}")
     else:
-        snr_values = list(range(-20, 20, 2))
-
-    snr_results_clean = evaluate_snr_sweep(model, test_loader_full, device, snr_values)
-
-    # Save SNR results
-    snr_df = pd.DataFrame([
-        {"snr": snr, "accuracy": acc}
-        for snr, acc in snr_results_clean.items()
-    ])
-    snr_df.to_csv(os.path.join(save_dir, "snr_sweep_clean.csv"), index=False)
-
-    print("\nClean Accuracy vs SNR:")
-    for snr, acc in sorted(snr_results_clean.items()):
-        bar = "#" * int(acc * 50)
-        print(f"  SNR {snr:+3d} dB: {acc:.4f}  {bar}")
+        print("\nSkipping test SNR sweep (--skip_snr_sweep).")
 
     # Save config used
     with open(os.path.join(save_dir, "config.json"), "w") as f:
