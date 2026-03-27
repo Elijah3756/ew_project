@@ -160,6 +160,8 @@ def _run_one_trial(config: dict[str, Any], args: argparse.Namespace, search_root
         str(args.input_length),
         "--device",
         args.device,
+        "--subset_fraction",
+        str(args.subset_fraction),
         "--skip_snr_sweep",
     ]
     if args.channel_aug:
@@ -217,6 +219,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--channel_aug", action="store_true")
+    parser.add_argument(
+        "--subset_fraction",
+        type=float,
+        default=1.0,
+        help="Fraction of training data per trial (stratified). "
+             "E.g. 0.10 uses 10%% of train set for faster HP search.",
+    )
     parser.add_argument("--emit_refine_candidates", action="store_true")
     args = parser.parse_args()
 

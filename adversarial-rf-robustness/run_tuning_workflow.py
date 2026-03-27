@@ -98,6 +98,8 @@ def _run_tune_train(
         *_stringify(epochs),
         "--weight_decay",
         *_stringify(weight_decay),
+        "--subset_fraction",
+        str(args.subset_fraction),
         "--seed",
         str(args.seed),
         "--device",
@@ -160,6 +162,13 @@ def main() -> None:
     parser.add_argument("--defense_pgd_steps", type=int, nargs="+", default=[3, 5, 7])
     parser.add_argument("--defense_sigma", type=float, nargs="+", default=[0.005, 0.01, 0.02, 0.05])
     parser.add_argument("--defense_shared_top_k", type=int, default=2)
+    parser.add_argument(
+        "--subset_fraction",
+        type=float,
+        default=1.0,
+        help="Fraction of training data per trial (stratified). "
+             "E.g. 0.10 uses 10%% of train set for faster HP search.",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.output_root, exist_ok=True)

@@ -201,6 +201,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel_aug", action="store_true", help="Enable channel augmentation")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument(
+        "--subset_fraction",
+        type=float,
+        default=1.0,
+        help="Fraction of training data to use (0.0-1.0). Stratified by class. "
+             "Useful for faster HP tuning. Val/test remain full-sized.",
+    )
+    parser.add_argument(
         "--skip_snr_sweep",
         action="store_true",
         help="Skip post-training clean SNR sweep (useful for tuning runs).",
@@ -235,6 +242,8 @@ def main():
     batch_size = config.get("training", {}).get("batch_size", args.batch_size)
     num_workers = config.get("training", {}).get("num_workers", 0)
 
+    subset_fraction = config.get("training", {}).get("subset_fraction", args.subset_fraction)
+
     train_loader, val_loader, test_loader = get_dataloaders(
         data_path=data_path,
         dataset_version=dataset_version,
@@ -242,8 +251,11 @@ def main():
         batch_size=batch_size,
         num_workers=num_workers,
         seed=seed,
+        subset_fraction=subset_fraction,
     )
     print(f"Dataset: {dataset_version}, SNR range: {snr_range}")
+    if subset_fraction < 1.0:
+        print(f"*** HP-tuning mode: using {subset_fraction:.0%} stratified subset of training data ***")
     print(f"Train: {len(train_loader.dataset):,} | Val: {len(val_loader.dataset):,} | Test: {len(test_loader.dataset):,}")
 
     # Model

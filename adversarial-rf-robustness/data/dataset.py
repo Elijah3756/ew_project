@@ -17,6 +17,12 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from typing import Optional, Tuple, List, Dict
 
+try:
+    from sklearn.model_selection import train_test_split as _sk_split
+    _HAS_SKLEARN = True
+except ImportError:
+    _HAS_SKLEARN = False
+
 
 class RadioMLDataset(Dataset):
     """
@@ -37,6 +43,7 @@ class RadioMLDataset(Dataset):
         split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
         seed: int = 42,
         transform=None,
+        subset_fraction: float = 1.0,
     ):
         self.data_path = data_path
         self.dataset_version = dataset_version
@@ -45,6 +52,7 @@ class RadioMLDataset(Dataset):
         self.split_ratios = split_ratios
         self.seed = seed
         self.transform = transform
+        self.subset_fraction = subset_fraction
 
         # For 2018.01a lazy loading
         self._hdf5_file = None
@@ -131,6 +139,21 @@ class RadioMLDataset(Dataset):
             snr_mask = (self.snrs[idx] >= self.snr_range[0]) & (self.snrs[idx] <= self.snr_range[1])
             idx = idx[snr_mask]
 
+        # Stratified subsampling for HP tuning (only applied to train split)
+        if self.subset_fraction < 1.0 and self.split == "train":
+            if not _HAS_SKLEARN:
+                raise ImportError(
+                    "scikit-learn is required for stratified subsampling. "
+                    "Install with: pip install scikit-learn"
+                )
+            sub_idx, _ = _sk_split(
+                np.arange(len(idx)),
+                train_size=self.subset_fraction,
+                stratify=self.labels[idx],
+                random_state=self.seed,
+            )
+            idx = idx[sub_idx]
+
         if not self._lazy:
             self.iq_data = self.iq_data[idx]
 
@@ -174,8 +197,14 @@ def get_dataloaders(
     batch_size: int = 256,
     num_workers: int = 4,
     seed: int = 42,
+    subset_fraction: float = 1.0,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Create train/val/test DataLoaders.
+
+    Args:
+        subset_fraction: If < 1.0, use a stratified subset of the training data.
+            Useful for faster hyperparameter tuning. Only affects the train split;
+            val/test remain full-sized for reliable metric comparison.
 
     NOTE: num_workers is forced to 0 for 2018.01a because h5py file handles
     cannot be shared across worker processes.
@@ -192,6 +221,7 @@ def get_dataloaders(
             snr_range=snr_range,
             split=split,
             seed=seed,
+            subset_fraction=subset_fraction,
         )
         loaders[split] = DataLoader(
             ds,
